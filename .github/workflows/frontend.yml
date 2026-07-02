@@ -43,6 +43,8 @@ jobs:
 
       - name: Build React app (sanity check)
         run: npm run build
+        env:
+          NODE_OPTIONS: --openssl-legacy-provider
 
       - name: Build Docker image (sanity check, not pushed)
         uses: docker/build-push-action@v5
