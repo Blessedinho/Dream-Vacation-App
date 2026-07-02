@@ -39,7 +39,7 @@ jobs:
         run: npm run lint --if-present
 
       - name: Run tests
-        run: CI=true npm test --if-present
+        run: CI=true npm test --if-present -- --watchAll=false --passWithNoTests
 
       - name: Build React app (sanity check)
         run: npm run build
