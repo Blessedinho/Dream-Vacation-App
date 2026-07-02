@@ -95,3 +95,109 @@ network, using the same Dockerfiles the pipeline uses.
 docker pull <your-dockerhub-username>/dream-vacation-backend:latest
 docker pull <your-dockerhub-username>/dream-vacation-frontend:latest
 ```
+
+## CI/CD Pipeline
+
+This repo uses two GitHub Actions workflows — `.github/workflows/backend.yml` and
+`.github/workflows/frontend.yml` — so the backend and frontend build and deploy
+independently of each other.
+
+### Triggers
+Each workflow runs on:
+- Every `push` to `main` or `dev`
+- Every `pull_request` targeting `main` or `dev`
+
+Path filters (`paths: backend/**` / `frontend/**`) mean a change to only the
+frontend won't trigger a pointless backend rebuild, and vice versa.
+
+### Stages
+Each workflow has two jobs, run in sequence:
+
+1. **`ci` (Lint, Test & Build)** — runs on every push and PR.
+   - Installs dependencies with `npm ci`
+   - Runs `npm run lint` (skipped automatically if no lint script exists)
+   - Runs `npm test` (skipped automatically if no test script exists)
+   - Does a local Docker build as a sanity check (image is not pushed anywhere)
+
+2. **`cd` (Push Image to Docker Hub)** — only runs on a direct `push` to
+   `main` or `dev` (not on pull requests), and only if the `ci` job passed.
+   - Logs into Docker Hub using the `DOCKER_USERNAME` / `DOCKER_TOKEN` secrets
+   - Builds and pushes the image tagged two ways:
+     - `<username>/dream-vacation-backend:<commit-sha>` — an immutable, traceable tag for that exact commit
+     - `<username>/dream-vacation-backend:latest` — always the most recent build on that branch
+   - (Same pattern for the frontend image)
+
+### Required GitHub Secrets
+Set these under **Settings → Secrets and variables → Actions**:
+
+| Secret | Purpose |
+|---|---|
+| `DOCKER_USERNAME` | Docker Hub username |
+| `DOCKER_TOKEN` | Docker Hub access token (Account Settings → Security → New Access Token) |
+
+### Running locally
+```bash
+docker-compose up --build
+```
+This builds both images locally and starts `frontend` (port 3000), `backend`
+(port 3001), and `db` (Postgres, port 5432) on the `dream-network` bridge
+network, using the same Dockerfiles the pipeline uses.
+
+### Pulling the CI-built images instead of building locally
+```bash
+docker pull <your-dockerhub-username>/dream-vacation-backend:latest
+docker pull <your-dockerhub-username>/dream-vacation-frontend:latest
+```
+
+## CI/CD Pipeline
+
+This repo uses two GitHub Actions workflows — `.github/workflows/backend.yml` and
+`.github/workflows/frontend.yml` — so the backend and frontend build and deploy
+independently of each other.
+
+### Triggers
+Each workflow runs on:
+- Every `push` to `main` or `dev`
+- Every `pull_request` targeting `main` or `dev`
+
+Path filters (`paths: backend/**` / `frontend/**`) mean a change to only the
+frontend won't trigger a pointless backend rebuild, and vice versa.
+
+### Stages
+Each workflow has two jobs, run in sequence:
+
+1. **`ci` (Lint, Test & Build)** — runs on every push and PR.
+   - Installs dependencies with `npm ci`
+   - Runs `npm run lint` (skipped automatically if no lint script exists)
+   - Runs `npm test` (skipped automatically if no test script exists)
+   - Does a local Docker build as a sanity check (image is not pushed anywhere)
+
+2. **`cd` (Push Image to Docker Hub)** — only runs on a direct `push` to
+   `main` or `dev` (not on pull requests), and only if the `ci` job passed.
+   - Logs into Docker Hub using the `DOCKER_USERNAME` / `DOCKER_TOKEN` secrets
+   - Builds and pushes the image tagged two ways:
+     - `<username>/dream-vacation-backend:<commit-sha>` — an immutable, traceable tag for that exact commit
+     - `<username>/dream-vacation-backend:latest` — always the most recent build on that branch
+   - (Same pattern for the frontend image)
+
+### Required GitHub Secrets
+Set these under **Settings → Secrets and variables → Actions**:
+
+| Secret | Purpose |
+|---|---|
+| `DOCKER_USERNAME` | Docker Hub username |
+| `DOCKER_TOKEN` | Docker Hub access token (Account Settings → Security → New Access Token) |
+
+### Running locally
+```bash
+docker-compose up --build
+```
+This builds both images locally and starts `frontend` (port 3000), `backend`
+(port 3001), and `db` (Postgres, port 5432) on the `dream-network` bridge
+network, using the same Dockerfiles the pipeline uses.
+
+### Pulling the CI-built images instead of building locally
+```bash
+docker pull <your-dockerhub-username>/dream-vacation-backend:latest
+docker pull <your-dockerhub-username>/dream-vacation-frontend:latest
+```
