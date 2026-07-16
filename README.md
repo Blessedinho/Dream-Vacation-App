@@ -201,3 +201,109 @@ network, using the same Dockerfiles the pipeline uses.
 docker pull <your-dockerhub-username>/dream-vacation-backend:latest
 docker pull <your-dockerhub-username>/dream-vacation-frontend:latest
 ```
+
+## AWS Deployment (EC2 via ClickOps + CI/CD)
+
+This section documents deploying the Dream Vacation App to AWS EC2, with
+infrastructure provisioned manually through the AWS Console and deployment
+automated through the existing GitHub Actions pipeline.
+
+### Part 1 — Networking
+
+A custom VPC was created to isolate this project's infrastructure:
+
+| Resource | Name | Details |
+|---|---|---|
+| VPC | `dream-vpc` | CIDR: `10.0.0.0/16` |
+| Subnet | `dream-subnet` | CIDR: `10.0.1.0/24` |
+| Internet Gateway | `dream-igw` | Attached to `dream-vpc` |
+| Route Table | `dream-rt` | Route `0.0.0.0/0` → `dream-igw`, associated with `dream-subnet` |
+
+This gives the subnet outbound/inbound internet access via the attached
+internet gateway, making instances launched into it publicly reachable.
+
+**Screenshot:** VPC and subnet
+`docs/screenshots/vpc-subnet.png`
+
+### Part 2 — EC2 Instance
+
+| Setting | Value |
+|---|---|
+| AMI | Ubuntu Server 22.04 LTS |
+| Instance type | `t2.micro` (Free Tier) |
+| VPC / Subnet | `dream-vpc` / `dream-subnet` |
+| Public IP | Auto-assigned |
+| Security group | `dream-sg` — inbound: SSH (22), HTTP (80), custom TCP (3001) |
+
+A **user data script** was supplied at launch to install Docker and the
+Docker Compose plugin automatically on first boot, so the instance is
+deployment-ready as soon as it's running:
+
+```bash
+#!/bin/bash
+apt-get update -y
+apt-get install -y ca-certificates curl gnupg
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+chmod a+r /etc/apt/keyrings/docker.gpg
+echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
+  $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+apt-get update -y
+apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+usermod -aG docker ubuntu
+systemctl enable docker
+systemctl start docker
+```
+
+**Screenshot:** EC2 instance running
+`docs/screenshots/ec2-running.png`
+
+### Part 3 — CI/CD Deployment
+
+The existing `backend.yml` GitHub Actions workflow was extended with a third
+job, `deploy`, that runs after the image build/push stage succeeds:
+The `deploy` job:
+1. Copies `docker-compose.prod.yml` to the EC2 instance via `scp-action`
+2. SSHes into the instance via `ssh-action`
+3. Runs `docker compose -f docker-compose.prod.yml pull` to fetch the latest
+   images from Docker Hub
+4. Runs `docker compose -f docker-compose.prod.yml up -d` to restart the
+   stack with the new images
+
+`docker-compose.prod.yml` differs from the local development compose file in
+one key way: instead of `build:` instructions, it references the pre-built
+images directly from Docker Hub (`blessedinho/dream-vacation-backend:latest`,
+`blessedinho/dream-vacation-frontend:latest`), so the server only ever pulls
+images — it never builds from source.
+
+A `.env` file with production database credentials was placed on the EC2
+instance directly (once, manually) rather than passed through the pipeline,
+to avoid putting secrets in transit through CI logs.
+
+**Required GitHub Secrets** (in addition to `DOCKER_USERNAME` / `DOCKER_TOKEN`):
+
+| Secret | Purpose |
+|---|---|
+| `EC2_HOST` | Public IP of the EC2 instance |
+| `EC2_USER` | SSH user (`ubuntu`) |
+| `EC2_SSH_KEY` | Full private key content (including `-----BEGIN/END-----` lines) for SSH auth |
+
+**Screenshot:** CI/CD pipeline showing successful `ci` → `cd` → `deploy` run
+`docs/screenshots/pipeline-success.png`
+
+### Verifying the Deployment
+
+Once deployed, the running containers can be confirmed directly on the server:
+
+```bash
+ssh -i dream-key.pem ubuntu@<EC2_PUBLIC_IP> "docker ps"
+```
+
+Expected containers: `dreamvacation-db`, `dreamvacation-backend`,
+`dreamvacation-frontend`.
+
+The live app is accessible at:
+**Screenshot:** App running in browser
+`docs/screenshots/app-in-browser.png`
+
