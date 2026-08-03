@@ -1,0 +1,87 @@
+name: Terraform Provision + Deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "terraform/**"
+      - ".github/workflows/terraform-deploy.yml"
+  workflow_dispatch:
+
+jobs:
+  terraform:
+    name: Terraform Provision
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform
+    outputs:
+      instance_ip: ${{ steps.tf_output.outputs.instance_ip }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Plan
+        run: terraform plan
+
+      - name: Terraform Apply
+        run: terraform apply -auto-approve
+
+      - name: Get outputs
+        id: tf_output
+        run: |
+          echo "instance_ip=$(terraform output -raw instance_public_ip)" >> "$GITHUB_OUTPUT"
+          terraform output -raw private_key_pem > /tmp/deploy_key.pem
+          chmod 400 /tmp/deploy_key.pem
+
+      - name: Save private key as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deploy-key
+          path: /tmp/deploy_key.pem
+          retention-days: 1
+
+  deploy:
+    name: Deploy App to EC2
+    needs: terraform
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download private key artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: deploy-key
+          path: /tmp
+
+      - name: Set key permissions
+        run: chmod 400 /tmp/deploy_key.pem
+
+      - name: Wait for instance to be SSH-ready
+        run: sleep 30
+
+      - name: Copy docker-compose.prod.yml to EC2
+        run: |
+          scp -o StrictHostKeyChecking=no -i /tmp/deploy_key.pem \
+            docker-compose.prod.yml \
+            ubuntu@${{ needs.terraform.outputs.instance_ip }}:/home/ubuntu/docker-compose.prod.yml
+
+      - name: SSH deploy
+        run: |
+          ssh -o StrictHostKeyChecking=no -i /tmp/deploy_key.pem \
+            ubuntu@${{ needs.terraform.outputs.instance_ip }} \
+            "mkdir -p /home/ubuntu/app && mv /home/ubuntu/docker-compose.prod.yml /home/ubuntu/app/ && cd /home/ubuntu/app && docker compose -f docker-compose.prod.yml pull && docker compose -f docker-compose.prod.yml up -d"
