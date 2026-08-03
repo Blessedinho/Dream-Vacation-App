@@ -1,1 +1,5 @@
 .env.prod
+terraform/dream-key-tf.pem
+terraform/*.tfstate
+terraform/*.tfstate.backup
+terraform/.terraform/
