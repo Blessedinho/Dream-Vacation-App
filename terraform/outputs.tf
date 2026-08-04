@@ -14,3 +14,8 @@ output "vpc_id" {
 output "subnet_id" {
   value = aws_subnet.dream_subnet.id
 }
+
+output "private_key_pem" {
+  value     = tls_private_key.dream_key.private_key_pem
+  sensitive = true
+}

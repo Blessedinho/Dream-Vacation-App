@@ -19,3 +19,11 @@ terraform {
 provider "aws" {
   region = var.aws_region
 }
+
+terraform {
+  backend "s3" {
+    bucket = "dream-vacation-tfstate-1785772509"
+    key    = "dream-vacation/terraform.tfstate"
+    region = "us-east-1"
+  }
+}
