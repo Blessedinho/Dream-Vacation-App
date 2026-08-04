@@ -307,3 +307,235 @@ The live app is accessible at:
 **Screenshot:** App running in browser
 `docs/screenshots/app-in-browser.png`
 
+
+## AWS Deployment via Terraform + CloudWatch Monitoring
+
+This section documents provisioning AWS infrastructure with Terraform
+(Infrastructure as Code) instead of manual console clicks, deploying the app
+via an extended CI/CD pipeline, and monitoring the EC2 instance with
+CloudWatch.
+
+### Part 1 — Networking (Terraform)
+
+All networking resources were defined as code in `terraform/vpc.tf`:
+
+```hcl
+resource "aws_vpc" "dream_vpc" {
+  cidr_block           = "10.0.0.0/16"
+  enable_dns_support   = true
+  enable_dns_hostnames = true
+
+  tags = {
+    Name = "dream-vpc"
+  }
+}
+
+resource "aws_subnet" "dream_subnet" {
+  vpc_id                  = aws_vpc.dream_vpc.id
+  cidr_block              = "10.0.1.0/24"
+  map_public_ip_on_launch = true
+  availability_zone       = "${var.aws_region}a"
+
+  tags = {
+    Name = "dream-subnet"
+  }
+}
+
+resource "aws_internet_gateway" "dream_igw" {
+  vpc_id = aws_vpc.dream_vpc.id
+
+  tags = {
+    Name = "dream-igw"
+  }
+}
+
+resource "aws_route_table" "dream_rt" {
+  vpc_id = aws_vpc.dream_vpc.id
+
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.dream_igw.id
+  }
+
+  tags = {
+    Name = "dream-rt"
+  }
+}
+
+resource "aws_route_table_association" "dream_rta" {
+  subnet_id      = aws_subnet.dream_subnet.id
+  route_table_id = aws_route_table.dream_rt.id
+}
+```
+
+**Screenshot — VPC (created via Terraform):**
+![VPC](docs/screenshots/terraform/vpc.png)
+
+**Screenshot — Subnet (created via Terraform):**
+![Subnet](docs/screenshots/terraform/subnet.png)
+
+### Part 2 — EC2 Instance (Terraform)
+
+The EC2 instance uses a data source to always resolve the **latest** Ubuntu
+22.04 LTS AMI at apply-time, rather than a hardcoded AMI ID:
+
+```hcl
+data "aws_ami" "ubuntu" {
+  most_recent = true
+  owners      = ["099720109477"] # Canonical
+
+  filter {
+    name   = "name"
+    values = ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"]
+  }
+
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+}
+
+resource "aws_instance" "dream_app_server" {
+  ami                    = data.aws_ami.ubuntu.id
+  instance_type          = "t3.micro"
+  subnet_id              = aws_subnet.dream_subnet.id
+  vpc_security_group_ids = [aws_security_group.dream_sg_tf.id]
+  key_name               = aws_key_pair.dream_key.key_name
+
+  user_data = <<-EOF2
+    #!/bin/bash
+    apt-get update -y
+    apt-get install -y ca-certificates curl gnupg
+    install -m 0755 -d /etc/apt/keyrings
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+    chmod a+r /etc/apt/keyrings/docker.gpg
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+    apt-get update -y
+    apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    usermod -aG docker ubuntu
+    systemctl enable docker
+    systemctl start docker
+  EOF2
+
+  tags = {
+    Name = "dream-vacation-server-tf"
+  }
+}
+```
+
+The SSH key pair itself is also fully Terraform-managed — generated,
+registered with AWS, and saved locally as a `.pem` file automatically:
+
+```hcl
+resource "tls_private_key" "dream_key" {
+  algorithm = "RSA"
+  rsa_bits  = 4096
+}
+
+resource "aws_key_pair" "dream_key" {
+  key_name   = "dream-key-tf"
+  public_key = tls_private_key.dream_key.public_key_openssh
+}
+
+resource "local_file" "private_key" {
+  content         = tls_private_key.dream_key.private_key_pem
+  filename        = "${path.module}/dream-key-tf.pem"
+  file_permission = "0400"
+}
+```
+
+Security group allows SSH (22), HTTP (80), and the backend API port (3001).
+
+**Screenshot — EC2 instance running:**
+![EC2 Running](docs/screenshots/terraform/ec2-running.png)
+
+### CloudWatch Monitoring
+
+EC2 automatically reports basic metrics (including `CPUUtilization`) to
+CloudWatch under the `AWS/EC2` namespace with no extra agent required. A
+CloudWatch alarm was defined in Terraform to watch that metric:
+
+```hcl
+resource "aws_cloudwatch_metric_alarm" "high_cpu" {
+  alarm_name          = "dream-app-high-cpu"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 2
+  metric_name         = "CPUUtilization"
+  namespace           = "AWS/EC2"
+  period              = 120
+  statistic           = "Average"
+  threshold           = 70
+  alarm_description   = "Triggers when average CPU exceeds 70% for 4 minutes"
+
+  dimensions = {
+    InstanceId = aws_instance.dream_app_server.id
+  }
+}
+```
+
+**Screenshot — CloudWatch CPU metrics/alarm:**
+![CloudWatch](docs/screenshots/terraform/cloudwatch.png)
+
+### Part 3 — CI/CD Deployment
+
+The pipeline (`.github/workflows/terraform-deploy.yml`) has two jobs:
+**`terraform` job:**
+- Configures AWS credentials from GitHub Secrets
+- Runs `terraform init`, `terraform plan`, `terraform apply -auto-approve`
+  against a **remote S3 backend**, so infrastructure state persists across
+  pipeline runs instead of resetting each time
+- Outputs the instance's public IP and the generated private key for the
+  next job to use
+
+**`deploy` job:**
+- Downloads the private key produced by the `terraform` job
+- Copies `docker-compose.prod.yml` to the EC2 instance via `scp`
+- SSHes in, pulls the latest Docker Hub images, and runs
+  `docker compose up -d`
+
+**Remote state backend** (`terraform/providers.tf`):
+
+```hcl
+terraform {
+  backend "s3" {
+    bucket = "dream-vacation-tfstate-1785772509"
+    key    = "dream-vacation/terraform.tfstate"
+    region = "us-east-1"
+  }
+}
+```
+
+**Required GitHub Secrets** (in addition to those from the earlier ClickOps
+deployment project):
+
+| Secret | Purpose |
+|---|---|
+| `AWS_ACCESS_KEY_ID` | AWS credentials for Terraform to provision infrastructure |
+| `AWS_SECRET_ACCESS_KEY` | AWS credentials (secret half) |
+
+**Screenshot — Successful pipeline run (terraform → deploy):**
+![Pipeline Success](docs/screenshots/terraform/pipeline-success.png)
+
+### Verifying the Deployment
+
+```bash
+terraform -chdir=terraform output -raw instance_public_ip
+```
+
+The live app is accessible at the returned IP:
+**Screenshot — App running in browser:**
+![App in Browser](docs/screenshots/terraform/app-in-browser.png)
+
+### A note on debugging this stage
+
+The trickiest issue in this project was a **silent remote-state failure**:
+the S3 backend block had been added to `providers.tf` locally but never
+actually committed to git. Every CI run therefore initialized against an
+empty local backend, saw no existing resources, and attempted to recreate
+the entire infrastructure from scratch — failing only when it hit the EC2
+key pair, since AWS enforces global name-uniqueness on key pairs within an
+account/region. Adding a temporary `terraform state list` debug step to the
+pipeline made the discrepancy between local and CI state immediately
+obvious, which pointed straight at the real fix: committing the missing
+backend configuration.
+
